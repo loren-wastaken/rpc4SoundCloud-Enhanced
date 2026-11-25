@@ -1,123 +1,210 @@
+
 // rpc4SoundCloud Enhanced — content.js
-const RELAY_URL = "ws://localhost:6989";
+
+const RELAY_URL = "ws://127.0.0.1:6989";
 const POLL_INTERVAL_MS = 1000;
+const TAB_ID = crypto.randomUUID();
 
 let socket = null;
 let reconnectDelay = 1000;
+let reconnectTimer = null;
+let pollTimer = null;
 let lastPayload = null;
 let lastPosition = null;
 let stuckCounter = 0;
 let lastUrl = location.href;
 let wasPlaying = false;
+let stopped = false;
+let lastPositionChange = Date.now();
+
+function send(message) {
+    if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(message));
+        return true;
+    }
+    return false;
+}
 
 function clearPresence() {
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(null));
-  }
+    lastPayload = null;
+    send({ type: "presence", payload: null });
 }
 
 function connect() {
-  socket = new WebSocket(RELAY_URL);
-  socket.addEventListener("open", () => {
-    console.log("[rpc4SoundCloud] connected to relay");
-    reconnectDelay = 1000;
-    lastPayload = null;
-    lastPosition = null;
-    stuckCounter = 0;
-    clearPresence(); 
-  });
-  socket.addEventListener("close", scheduleReconnect);
-  socket.addEventListener("error", () => socket.close());
+    if (stopped || socket?.readyState === WebSocket.OPEN ||
+        socket?.readyState === WebSocket.CONNECTING) return;
+
+    socket = new WebSocket(RELAY_URL);
+
+    socket.addEventListener("open", () => {
+        if (stopped) {
+            socket?.close();
+            return;
+        }
+
+        console.log("[rpc4SoundCloud] connected to relay");
+        reconnectDelay = 1000;
+        lastPayload = null;
+        lastPosition = null;
+        stuckCounter = 0;
+        lastPositionChange = Date.now();
+
+        send({
+            type: "hello",
+            role: "extension",
+            tabId: TAB_ID
+        });
+
+        tick();
+    });
+
+    socket.addEventListener("close", () => {
+        if (socket?.readyState !== WebSocket.CLOSED) return;
+        scheduleReconnect();
+    });
+
+    socket.addEventListener("error", () => {
+        socket?.close();
+    });
 }
 
 function scheduleReconnect() {
-  setTimeout(connect, reconnectDelay);
-  reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+    if (stopped || reconnectTimer !== null) return;
+
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+    }, reconnectDelay);
+
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
 }
 
 function readNowPlaying() {
-  const ms = navigator.mediaSession;
-  if (!ms || !ms.metadata) return null;
+    const ms = navigator.mediaSession;
+    if (!ms?.metadata) {
+        wasPlaying = false;
+        return null;
+    }
 
-  const { title, artist, artwork } = ms.metadata;
-  const artworkUrl = Array.isArray(artwork) && artwork.length > 0
-    ? artwork[artwork.length - 1].src
-    : null;
+    const { title, artist, artwork } = ms.metadata;
 
-  const timeline = document.querySelector('.playbackTimeline__progressWrapper');
-  
-  let positionSeconds = null;
-  let durationSeconds = null;
-  let buffering = false;
+    const artworkUrl = Array.isArray(artwork) && artwork.length
+        ? artwork[artwork.length - 1]?.src ?? null
+        : null;
 
-  if (timeline) {
-    const pos = timeline.getAttribute('aria-valuenow');
-    const dur = timeline.getAttribute('aria-valuemax');
-    if (pos !== null) positionSeconds = parseFloat(pos);
-    if (dur !== null) durationSeconds = parseFloat(dur);
-  }
+    const timeline = document.querySelector(
+        ".playbackTimeline__progressWrapper"
+    );
 
-  const isPlaying = ms.playbackState === "playing";
+    let positionSeconds = null;
+    let durationSeconds = null;
 
-  // Если трек на паузе — принудительно очищаем статус
-  if (!isPlaying && wasPlaying) {
-    clearPresence();
-    wasPlaying = false;
-    return null; // Не отправляем данные, чтобы не висел статус
-  }
-  
-  if (isPlaying) {
+    if (timeline) {
+        const pos = Number(timeline.getAttribute("aria-valuenow"));
+        const dur = Number(timeline.getAttribute("aria-valuemax"));
+
+        if (Number.isFinite(pos) && pos >= 0)
+            positionSeconds = pos;
+
+        if (Number.isFinite(dur) && dur > 0)
+            durationSeconds = dur;
+    }
+
+    const isPlaying = ms.playbackState === "playing";
+
+    if (!isPlaying) {
+        wasPlaying = false;
+        lastPosition = null;
+        stuckCounter = 0;
+        return null;
+    }
+
     wasPlaying = true;
-  }
 
-  if (positionSeconds === 0) {
-    buffering = true;
-  }
+    let buffering = false;
 
-  if (positionSeconds !== null && lastPosition !== null && positionSeconds === lastPosition) {
-    stuckCounter++;
-    if (stuckCounter >= 2) buffering = true;
-  } else {
-    stuckCounter = 0;
-  }
-  lastPosition = positionSeconds;
+    if (positionSeconds !== null) {
+        if (lastPosition === null || positionSeconds !== lastPosition) {
+            lastPosition = positionSeconds;
+            lastPositionChange = Date.now();
+            stuckCounter = 0;
+        } else {
+            stuckCounter++;
 
-  return {
-    title: title || null,
-    artist: artist || null,
-    artworkUrl,
-    playing: isPlaying,
-    buffering: buffering,
-    positionSeconds,
-    durationSeconds,
-    url: location.href,
-  };
+            // Allow startup, seeking and short timeline updates.
+            // Only consider it stalled after several seconds.
+            if (stuckCounter >= 5 &&
+                Date.now() - lastPositionChange >= 5000) {
+                buffering = true;
+            }
+        }
+    } else {
+        lastPosition = null;
+        stuckCounter = 0;
+    }
+
+    return {
+        title: typeof title === "string" ? title.trim() || null : null,
+        artist: typeof artist === "string" ? artist.trim() || null : null,
+        artworkUrl,
+        playing: true,
+        buffering,
+        positionSeconds,
+        durationSeconds,
+        url: location.href
+    };
 }
 
 function tick() {
-  if (location.href !== lastUrl) {
-    lastUrl = location.href;
-    lastPayload = null; 
-    clearPresence(); 
-  }
+    if (stopped) return;
 
-  const payload = readNowPlaying();
-  if (!payload) {
-    if (lastPayload !== null) {
+    if (location.href !== lastUrl) {
+        lastUrl = location.href;
         lastPayload = null;
-        clearPresence();
+        lastPosition = null;
+        stuckCounter = 0;
+        lastPositionChange = Date.now();
     }
-    return;
-  }
 
-  const serialized = JSON.stringify(payload);
-  if (serialized !== lastPayload) {
-    lastPayload = serialized;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(serialized);
+    const payload = readNowPlaying();
+
+    if (!payload) {
+        if (lastPayload !== null) {
+            clearPresence();
+        }
+        return;
     }
-  }
+
+    const serialized = JSON.stringify(payload);
+
+    if (serialized !== lastPayload) {
+        lastPayload = serialized;
+
+        send({
+            type: "presence",
+            payload
+        });
+    }
 }
 
+function shutdown() {
+    if (stopped) return;
+    stopped = true;
+
+    if (pollTimer !== null)
+        clearInterval(pollTimer);
+
+    if (reconnectTimer !== null)
+        clearTimeout(reconnectTimer);
+
+    send({ type: "stop" });
+
+    socket?.close();
+    socket = null;
+}
+
+window.addEventListener("pagehide", shutdown);
+window.addEventListener("beforeunload", shutdown);
+
 connect();
-setInterval(tick, POLL_INTERVAL_MS);
+pollTimer = setInterval(tick, POLL_INTERVAL_MS);
