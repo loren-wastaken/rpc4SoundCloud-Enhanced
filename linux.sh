@@ -30,13 +30,15 @@ echo "-- Installing relay server dependencies --"
 (cd "$REPO_DIR/relay-server" && npm install)
 
 # --- Vencord source -------------------------------------------------------
-if [ -d "$VENCORD_DIR" ]; then
-    echo "-- Found existing Vencord source at $VENCORD_DIR, skipping clone --"
+if [ -d "$VENCORD_DIR/.git" ]; then
+    echo "-- Found existing Vencord source at $VENCORD_DIR --"
 else
     echo "-- Cloning Vencord source into $VENCORD_DIR --"
     git clone https://github.com/Vendicated/Vencord "$VENCORD_DIR"
-    (cd "$VENCORD_DIR" && pnpm install)
 fi
+
+echo "-- Installing Vencord dependencies --"
+(cd "$VENCORD_DIR" && pnpm install)
 
 # --- drop in the plugin ---------------------------------------------------
 PLUGIN_DIR="$VENCORD_DIR/src/userplugins/rpc4SoundCloud"

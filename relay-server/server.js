@@ -148,6 +148,16 @@ wss.on("connection", socket => {
             return;
         }
 
+        if (message.type === "presence" && message.payload === null) {
+            tabs.set(client.tabId, {
+                payload: null,
+                updatedAt: Date.now(),
+            });
+
+            publishPresence();
+            return;
+        }
+
         if (message.type !== "presence" || !validPlayback(message.payload)) {
             console.warn("[relay] rejected invalid presence payload");
             return;

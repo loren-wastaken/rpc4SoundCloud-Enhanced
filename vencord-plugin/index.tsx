@@ -98,7 +98,6 @@ async function buildActivity(data: NowPlaying): Promise<Activity | undefined> {
 
     const title = data.title.trim();
     const artist = data.artist?.trim();
-
     if (!title) return undefined;
 
     const appId = settings.store.appId || "0";
